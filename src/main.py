@@ -1,210 +1,470 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import os
 import json
-import subprocess
-import sys
+import zipfile
+import shutil
+import tempfile
+import winreg
 
-SETTINGS_FILENAME = ".focus_settings.json"
-DEFAULT_WINDOW_SIZE = 5
+APP_NAME = "ForwardOnly"
+FWD_EXT = ".fwd"
+CONTENT_FILE = "content.txt"
+SETTINGS_FILE = "settings.json"
 
-def load_settings(project_dir):
-    path = os.path.join(project_dir, SETTINGS_FILENAME)
-    if os.path.exists(path):
+DEFAULT_SETTINGS = {
+    "window_size": 5,
+    "theme": "light",
+    "dark_color": "green",
+    "export_txt": "",
+    "export_docx": ""
+}
+
+# ── Theme definitions ─────────────────────────────────────────────────────────
+
+THEMES = {
+    "light": {
+        "bg":         "#d4d0c8",
+        "content_bg": "#ffffff",
+        "content_fg": "#000000",
+        "hidden_fg":  "#cccccc",
+        "menu_bg":    "#d4d0c8",
+        "menu_fg":    "#000000",
+        "btn_bg":     "#d4d0c8",
+        "btn_fg":     "#000000",
+        "status_bg":  "#d4d0c8",
+        "status_fg":  "#444444",
+        "relief":     tk.RAISED,
+    },
+    "dark_green": {
+        "bg":         "#0d0d0d",
+        "content_bg": "#0a0a0a",
+        "content_fg": "#33ff33",
+        "hidden_fg":  "#1a3d1a",
+        "menu_bg":    "#1a1a1a",
+        "menu_fg":    "#33ff33",
+        "btn_bg":     "#1a1a1a",
+        "btn_fg":     "#33ff33",
+        "status_bg":  "#111111",
+        "status_fg":  "#1a8c1a",
+        "relief":     tk.FLAT,
+    },
+    "dark_amber": {
+        "bg":         "#0d0a00",
+        "content_bg": "#0a0800",
+        "content_fg": "#ffb000",
+        "hidden_fg":  "#3d2a00",
+        "menu_bg":    "#1a1400",
+        "menu_fg":    "#ffb000",
+        "btn_bg":     "#1a1400",
+        "btn_fg":     "#ffb000",
+        "status_bg":  "#111000",
+        "status_fg":  "#8c6200",
+        "relief":     tk.FLAT,
+    }
+}
+
+def get_theme(settings):
+    if settings["theme"] == "light":
+        return THEMES["light"]
+    return THEMES[f"dark_{settings['dark_color']}"]
+
+
+# ── .fwd file I/O ─────────────────────────────────────────────────────────────
+
+def load_fwd(path):
+    with zipfile.ZipFile(path, "r") as z:
+        content = z.read(CONTENT_FILE).decode("utf-8")
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            settings = json.loads(z.read(SETTINGS_FILE).decode("utf-8"))
         except Exception:
-            pass
-    return {"window_size": DEFAULT_WINDOW_SIZE}
+            settings = {}
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update(settings)
+    return content, merged
 
-def save_settings(project_dir, settings):
-    path = os.path.join(project_dir, SETTINGS_FILENAME)
+def save_fwd(path, content, settings):
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(CONTENT_FILE, content.encode("utf-8"))
+        z.writestr(SETTINGS_FILE, json.dumps(settings, indent=2).encode("utf-8"))
+    shutil.move(tmp, path)
+
+
+# ── Desktop shortcut ──────────────────────────────────────────────────────────
+
+def create_desktop_shortcut():
+    try:
+        import ctypes
+        exe_path = os.path.abspath(__file__).replace(".py", ".exe")
+        if not os.path.exists(exe_path):
+            exe_path = os.path.abspath(os.sys.executable)
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        shortcut_path = os.path.join(desktop, f"{APP_NAME}.lnk")
+        if os.path.exists(shortcut_path):
+            return
+        # Use Windows Script Host via shell
+        import subprocess
+        vbs = f"""
+Set oWS = WScript.CreateObject("WScript.Shell")
+sLinkFile = "{shortcut_path.replace(chr(92), chr(92)*2)}"
+Set oLink = oWS.CreateShortcut(sLinkFile)
+oLink.TargetPath = "{exe_path.replace(chr(92), chr(92)*2)}"
+oLink.Save
+"""
+        vbs_path = os.path.join(tempfile.gettempdir(), "fo_shortcut.vbs")
+        with open(vbs_path, "w") as f:
+            f.write(vbs)
+        subprocess.run(["wscript", vbs_path], check=False,
+                       creationflags=0x08000000)
+        os.remove(vbs_path)
+    except Exception:
+        pass  # Shortcut creation is best-effort
+
+
+# ── Export ────────────────────────────────────────────────────────────────────
+
+def export_txt(content, remembered_path):
+    path = remembered_path if remembered_path and os.path.isdir(
+        os.path.dirname(remembered_path)) else None
+    if not path:
+        path = filedialog.asksaveasfilename(
+            title="Export as TXT",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt")])
+    if not path:
+        return None
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(settings, f)
+        f.write(content)
+    return path
 
-def get_txt_file(project_dir):
-    files = [f for f in os.listdir(project_dir) if f.endswith(".txt")]
-    if len(files) == 1:
-        return os.path.join(project_dir, files[0])
-    return None
+def export_docx(content, remembered_path):
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except ImportError:
+        messagebox.showerror("Missing library",
+            "python-docx is not installed.\nRun: pip install python-docx")
+        return None
 
-def read_text(txt_path):
-    if not os.path.exists(txt_path):
-        return ""
-    with open(txt_path, "r", encoding="utf-8") as f:
-        return f.read()
+    path = remembered_path if remembered_path and os.path.isdir(
+        os.path.dirname(remembered_path)) else None
+    if not path:
+        path = filedialog.asksaveasfilename(
+            title="Export as DOCX",
+            defaultextension=".docx",
+            filetypes=[("Word documents", "*.docx")])
+    if not path:
+        return None
 
-def write_text(txt_path, text):
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    doc = Document()
+    for style in doc.styles:
+        if style.name == "Normal":
+            style.font.name = "Courier New"
+            style.font.size = Pt(11)
+    for para_text in content.split("\n"):
+        doc.add_paragraph(para_text)
+    doc.save(path)
+    return path
 
-def get_last_n_words(text, n):
-    words = text.split()
-    return words[-n:] if len(words) >= n else words
 
+# ── Main Application ──────────────────────────────────────────────────────────
 
-class LauncherApp:
+class ForwardOnly:
     def __init__(self, root):
         self.root = root
-        self.root.title("ForwardOnly")
-        self.root.resizable(False, False)
-        self.root.geometry("360x260")
-        self.project_dir = None
-        self.settings = {}
-        self.txt_path = None
-        self._build_ui()
-
-    def _build_ui(self):
-        pad = dict(padx=20, pady=8)
-
-        tk.Label(self.root, text="ForwardOnly", font=("Courier New", 16, "bold")).pack(pady=(24, 2))
-        tk.Label(self.root, text="a forward-only writing tool", font=("Courier New", 9), fg="#888").pack(pady=(0, 16))
-
-        self.project_label = tk.Label(self.root, text="No project open", font=("Courier New", 9), fg="#555")
-        self.project_label.pack()
-
-        tk.Button(self.root, text="Open Project Folder", font=("Courier New", 10),
-                  command=self.open_project, width=22).pack(**pad)
-
-        frame = tk.Frame(self.root)
-        frame.pack(pady=4)
-        tk.Label(frame, text="Window size:", font=("Courier New", 9)).pack(side=tk.LEFT)
-        self.window_size_var = tk.IntVar(value=DEFAULT_WINDOW_SIZE)
-        spin = tk.Spinbox(frame, from_=1, to=20, textvariable=self.window_size_var,
-                          width=4, font=("Courier New", 10))
-        spin.pack(side=tk.LEFT, padx=6)
-        tk.Label(frame, text="words", font=("Courier New", 9)).pack(side=tk.LEFT)
-
-        btn_frame = tk.Frame(self.root)
-        btn_frame.pack(pady=12)
-        self.write_btn = tk.Button(btn_frame, text="Write", font=("Courier New", 10),
-                                   command=self.open_write_mode, width=10, state=tk.DISABLED)
-        self.write_btn.pack(side=tk.LEFT, padx=6)
-        self.review_btn = tk.Button(btn_frame, text="Review", font=("Courier New", 10),
-                                    command=self.open_review_mode, width=10, state=tk.DISABLED)
-        self.review_btn.pack(side=tk.LEFT, padx=6)
-
-    def open_project(self):
-        folder = filedialog.askdirectory(title="Select project folder")
-        if not folder:
-            return
-        txt = get_txt_file(folder)
-        if txt is None:
-            txts = [f for f in os.listdir(folder) if f.endswith(".txt")]
-            if len(txts) == 0:
-                create = messagebox.askyesno("No .txt file found",
-                    "No .txt file found in this folder.\nCreate one now?")
-                if create:
-                    name = os.path.basename(folder) + ".txt"
-                    txt = os.path.join(folder, name)
-                    write_text(txt, "")
-                else:
-                    return
-            else:
-                messagebox.showerror("Multiple .txt files",
-                    "More than one .txt file found.\nPlease keep only one per project folder.")
-                return
-
-        self.project_dir = folder
-        self.txt_path = txt
-        self.settings = load_settings(folder)
-        self.window_size_var.set(self.settings.get("window_size", DEFAULT_WINDOW_SIZE))
-        self.project_label.config(
-            text=f"Project: {os.path.basename(folder)}  |  {os.path.basename(txt)}")
-        self.write_btn.config(state=tk.NORMAL)
-        self.review_btn.config(state=tk.NORMAL)
-
-    def open_write_mode(self):
-        wsize = self.window_size_var.get()
-        self.settings["window_size"] = wsize
-        save_settings(self.project_dir, self.settings)
-        text = read_text(self.txt_path)
+        self.root.title(APP_NAME)
         self.root.withdraw()
-        WriteWindow(self.root, self.txt_path, text, wsize, self._on_write_close)
 
-    def _on_write_close(self):
-        self.root.deiconify()
+        self.fwd_path = None
+        self.content = ""
+        self.settings = dict(DEFAULT_SETTINGS)
+        self.mode = "focus"  # "focus" or "review"
+        self.session_text = ""
 
-    def open_review_mode(self):
+        create_desktop_shortcut()
+        self._show_launcher()
+
+    # ── Launcher ──────────────────────────────────────────────────────────────
+
+    def _show_launcher(self):
+        self.launcher = tk.Toplevel(self.root)
+        self.launcher.title(APP_NAME)
+        self.launcher.resizable(False, False)
+        self.launcher.geometry("300x220")
+        self.launcher.protocol("WM_DELETE_WINDOW", self.root.destroy)
+
+        tk.Label(self.launcher, text="ForwardOnly",
+                 font=("Courier New", 16, "bold")).pack(pady=(28, 2))
+        tk.Label(self.launcher, text="a forward-only writing tool",
+                 font=("Courier New", 9), fg="#888").pack(pady=(0, 20))
+
+        tk.Button(self.launcher, text="New Project", font=("Courier New", 10),
+                  command=self._new_project, width=20,
+                  relief=tk.RAISED).pack(pady=5)
+        tk.Button(self.launcher, text="Open Project", font=("Courier New", 10),
+                  command=self._open_project, width=20,
+                  relief=tk.RAISED).pack(pady=5)
+
+    def _new_project(self):
+        path = filedialog.asksaveasfilename(
+            title="Create new project",
+            defaultextension=FWD_EXT,
+            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}")])
+        if not path:
+            return
+        self.fwd_path = path
+        self.content = ""
+        self.settings = dict(DEFAULT_SETTINGS)
+        save_fwd(path, self.content, self.settings)
+        self.launcher.destroy()
+        self._open_main_window("focus")
+
+    def _open_project(self):
+        path = filedialog.askopenfilename(
+            title="Open project",
+            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}"), ("All files", "*.*")])
+        if not path:
+            return
         try:
-            os.startfile(self.txt_path)
+            self.content, self.settings = load_fwd(path)
         except Exception as e:
             messagebox.showerror("Error", f"Could not open file:\n{e}")
+            return
+        self.fwd_path = path
+        self.launcher.destroy()
+        self._ask_mode()
 
+    def _ask_mode(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Open as...")
+        dialog.resizable(False, False)
+        dialog.geometry("260x140")
+        dialog.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
-class WriteWindow:
-    def __init__(self, parent, txt_path, existing_text, window_size, on_close):
-        self.parent = parent
-        self.txt_path = txt_path
-        self.window_size = window_size
-        self.on_close = on_close
+        tk.Label(dialog, text="Open in which mode?",
+                 font=("Courier New", 10)).pack(pady=(24, 12))
 
-        # Internal state: full text written this session appended to existing
-        self.base_text = existing_text
-        self.session_text = ""  # only new text typed this session
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack()
 
-        self.win = tk.Toplevel(parent)
-        self.win.title("ForwardOnly — Write Mode")
-        self.win.geometry("700x420")
-        self.win.protocol("WM_DELETE_WINDOW", self._finish)
+        def pick(mode):
+            dialog.destroy()
+            self._open_main_window(mode)
+
+        tk.Button(btn_frame, text="Review", font=("Courier New", 10),
+                  command=lambda: pick("review"), width=10,
+                  relief=tk.RAISED).pack(side=tk.LEFT, padx=8)
+        tk.Button(btn_frame, text="Focus", font=("Courier New", 10),
+                  command=lambda: pick("focus"), width=10,
+                  relief=tk.RAISED).pack(side=tk.LEFT, padx=8)
+
+    # ── Main window ───────────────────────────────────────────────────────────
+
+    def _open_main_window(self, mode):
+        self.mode = mode
+        self.session_text = ""
+
+        self.win = tk.Toplevel(self.root)
+        self.win.title(f"{APP_NAME} — {os.path.basename(self.fwd_path)}")
+        self.win.geometry("800x520")
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._build_menu()
+        self._build_toolbar()
+        self._build_content()
+        self._build_statusbar()
+        self._apply_theme()
+
+        if mode == "focus":
+            self._enter_focus()
+        else:
+            self._enter_review()
+
         self.win.focus_force()
 
-        self._build_ui()
-        self._refresh_display()
-        self.win.bind("<Key>", self._on_key)
+    def _build_menu(self):
+        t = get_theme(self.settings)
+        self.menubar = tk.Menu(self.win, bg=t["menu_bg"], fg=t["menu_fg"],
+                               font=("Courier New", 9))
+
+        # File
+        file_menu = tk.Menu(self.menubar, tearoff=0,
+                            bg=t["menu_bg"], fg=t["menu_fg"],
+                            font=("Courier New", 9))
+        file_menu.add_command(label="New Project", command=self._menu_new)
+        file_menu.add_command(label="Open Project", command=self._menu_open)
+        file_menu.add_command(label="Save", command=self._save, accelerator="Ctrl+S")
+        file_menu.add_separator()
+        export_menu = tk.Menu(file_menu, tearoff=0,
+                              bg=t["menu_bg"], fg=t["menu_fg"],
+                              font=("Courier New", 9))
+        export_menu.add_command(label="TXT", command=self._export_txt)
+        export_menu.add_command(label="DOCX", command=self._export_docx)
+        file_menu.add_cascade(label="Export", menu=export_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+        self.menubar.add_cascade(label="File", menu=file_menu)
+
+        # Settings
+        settings_menu = tk.Menu(self.menubar, tearoff=0,
+                                 bg=t["menu_bg"], fg=t["menu_fg"],
+                                 font=("Courier New", 9))
+        settings_menu.add_command(label="Window Size...", command=self._set_window_size)
+        theme_menu = tk.Menu(settings_menu, tearoff=0,
+                             bg=t["menu_bg"], fg=t["menu_fg"],
+                             font=("Courier New", 9))
+        theme_menu.add_command(label="Light", command=lambda: self._set_theme("light"))
+        theme_menu.add_command(label="Dark — Green", command=lambda: self._set_theme("dark", "green"))
+        theme_menu.add_command(label="Dark — Amber", command=lambda: self._set_theme("dark", "amber"))
+        settings_menu.add_cascade(label="Theme", menu=theme_menu)
+        self.menubar.add_cascade(label="Settings", menu=settings_menu)
+
+        self.win.config(menu=self.menubar)
+        self.win.bind("<Control-s>", lambda e: self._save())
+
+    def _build_toolbar(self):
+        t = get_theme(self.settings)
+        self.toolbar = tk.Frame(self.win, bg=t["bg"], relief=tk.RAISED, bd=1)
+        self.toolbar.pack(fill=tk.X, side=tk.TOP)
+
+        self.mode_btn = tk.Button(self.toolbar, text="",
+                                  font=("Courier New", 9, "bold"),
+                                  relief=tk.RAISED, bd=2,
+                                  bg=t["btn_bg"], fg=t["btn_fg"],
+                                  command=self._toggle_mode)
+        self.mode_btn.pack(side=tk.LEFT, padx=6, pady=3)
+
+    def _build_content(self):
+        t = get_theme(self.settings)
+        self.content_frame = tk.Frame(self.win, bg=t["bg"])
+        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.text_area = tk.Text(self.content_frame,
+                                 font=("Courier New", 16),
+                                 wrap=tk.WORD, relief=tk.SUNKEN, bd=2,
+                                 padx=24, pady=24,
+                                 undo=True)
+        self.text_area.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(self.content_frame, command=self.text_area.yview)
+        self.text_area.config(yscrollcommand=scrollbar.set)
+
+        self.text_area.tag_config("hidden")
+        self.text_area.tag_config("visible")
+
+    def _build_statusbar(self):
+        t = get_theme(self.settings)
+        self.statusbar = tk.Frame(self.win, bg=t["status_bg"],
+                                  relief=tk.SUNKEN, bd=1, height=20)
+        self.statusbar.pack(fill=tk.X, side=tk.BOTTOM)
+        self.statusbar.pack_propagate(False)
+
+        self.status_mode = tk.Label(self.statusbar, text="",
+                                    font=("Courier New", 8),
+                                    bg=t["status_bg"], fg=t["status_fg"],
+                                    anchor=tk.W)
+        self.status_mode.pack(side=tk.LEFT, padx=8)
+
+        self.status_words = tk.Label(self.statusbar, text="",
+                                     font=("Courier New", 8),
+                                     bg=t["status_bg"], fg=t["status_fg"],
+                                     anchor=tk.E)
+        self.status_words.pack(side=tk.RIGHT, padx=8)
+
+        self.status_file = tk.Label(self.statusbar, text="",
+                                    font=("Courier New", 8),
+                                    bg=t["status_bg"], fg=t["status_fg"],
+                                    anchor=tk.CENTER)
+        self.status_file.pack(side=tk.LEFT, expand=True)
+
+    # ── Theme ─────────────────────────────────────────────────────────────────
+
+    def _apply_theme(self):
+        t = get_theme(self.settings)
+
+        self.win.config(bg=t["bg"])
+        self.toolbar.config(bg=t["bg"])
+        self.mode_btn.config(bg=t["btn_bg"], fg=t["btn_fg"])
+        self.content_frame.config(bg=t["bg"])
+        self.text_area.config(bg=t["content_bg"], fg=t["content_fg"],
+                              insertbackground=t["content_fg"],
+                              selectbackground=t["content_fg"],
+                              selectforeground=t["content_bg"])
+        self.text_area.tag_config("hidden", foreground=t["hidden_fg"])
+        self.text_area.tag_config("visible", foreground=t["content_fg"])
+        self.statusbar.config(bg=t["status_bg"])
+        self.status_mode.config(bg=t["status_bg"], fg=t["status_fg"])
+        self.status_words.config(bg=t["status_bg"], fg=t["status_fg"])
+        self.status_file.config(bg=t["status_bg"], fg=t["status_fg"])
+
+        # Rebuild menu with new colors
+        self.win.config(menu="")
+        self._build_menu()
+
+    def _set_theme(self, theme, color=None):
+        self.settings["theme"] = theme
+        if color:
+            self.settings["dark_color"] = color
+        self._apply_theme()
+        self._save()
+
+    # ── Modes ─────────────────────────────────────────────────────────────────
+
+    def _enter_focus(self):
+        self.mode = "focus"
+        self.session_text = ""
+        self.text_area.config(state=tk.DISABLED, cursor="arrow")
+        self.mode_btn.config(text="Switch to Review")
+        self.status_mode.config(text="FOCUS")
+        self._refresh_focus()
+        self.win.bind("<Key>", self._on_key_focus)
         self.win.bind("<Button-1>", lambda e: self.win.focus_force())
+        self.win.focus_force()
 
-    def _build_ui(self):
-        top = tk.Frame(self.win)
-        top.pack(fill=tk.X, padx=16, pady=(12, 0))
+    def _enter_review(self):
+        self.mode = "review"
+        self.text_area.config(state=tk.NORMAL, cursor="xterm")
+        self.text_area.delete("1.0", tk.END)
+        self.text_area.insert(tk.END, self.content)
+        self.mode_btn.config(text="Switch to Focus")
+        self.status_mode.config(text="REVIEW")
+        self._update_status()
+        self.win.unbind("<Key>")
+        self.text_area.bind("<KeyRelease>", self._on_review_key)
 
-        tk.Label(top, text="write mode", font=("Courier New", 9), fg="#888").pack(side=tk.LEFT)
+    def _toggle_mode(self):
+        if self.mode == "focus":
+            # Commit session text and switch to review
+            self.content += self.session_text
+            self.session_text = ""
+            self._save()
+            self._enter_review()
+        else:
+            # Capture review edits and switch to focus
+            self.content = self.text_area.get("1.0", tk.END).rstrip("\n")
+            self._save()
+            self._enter_focus()
 
-        self.word_count_label = tk.Label(top, text="", font=("Courier New", 9), fg="#888")
-        self.word_count_label.pack(side=tk.RIGHT)
-
-        self.display = tk.Text(self.win, font=("Courier New", 18),
-                               wrap=tk.WORD, state=tk.DISABLED,
-                               relief=tk.FLAT, bd=0,
-                               padx=32, pady=32,
-                               cursor="arrow")
-        self.display.pack(fill=tk.BOTH, expand=True, padx=4, pady=8)
-
-        # Tags for hidden vs visible text
-        self.display.tag_config("hidden", foreground="#e8e8e8")
-        self.display.tag_config("visible", foreground="#111111")
-        self.display.tag_config("cursor_block", background="#111111", foreground="#111111")
-
-        bottom = tk.Frame(self.win)
-        bottom.pack(fill=tk.X, padx=16, pady=(0, 12))
-        tk.Label(bottom, text="esc or close window to finish and save",
-                 font=("Courier New", 8), fg="#aaa").pack(side=tk.LEFT)
-
-        self.win.bind("<Escape>", lambda e: self._finish())
+    # ── Focus mode rendering ──────────────────────────────────────────────────
 
     def _full_text(self):
-        return self.base_text + self.session_text
+        return self.content + self.session_text
 
-    def _refresh_display(self):
+    def _refresh_focus(self):
         full = self._full_text()
         tokens = full.split()
         total_words = len(tokens)
+        n = self.settings["window_size"]
 
-        # Determine visible window: last N words
-        n = self.window_size
         if total_words <= n:
-            hidden_words = []
-            visible_words = tokens
+            hidden_words, visible_words = [], tokens
         else:
-            hidden_words = tokens[:-n]
-            visible_words = tokens[-n:]
+            hidden_words, visible_words = tokens[:-n], tokens[-n:]
 
         hidden_text = " ".join(hidden_words)
         visible_text = " ".join(visible_words)
 
-        # Preserve leading/trailing whitespace feel
-        # Reconstruct so spacing after hidden block matches original
         if hidden_words and visible_words:
             display_text = hidden_text + " " + visible_text
             hidden_end = len(hidden_text) + 1
@@ -215,74 +475,130 @@ class WriteWindow:
             display_text = visible_text
             hidden_end = 0
 
-        self.display.config(state=tk.NORMAL)
-        self.display.delete("1.0", tk.END)
-        self.display.insert(tk.END, display_text)
+        self.text_area.config(state=tk.NORMAL)
+        self.text_area.delete("1.0", tk.END)
+        self.text_area.insert(tk.END, display_text)
 
-        # Apply tags
-        self.display.tag_remove("hidden", "1.0", tk.END)
-        self.display.tag_remove("visible", "1.0", tk.END)
+        self.text_area.tag_remove("hidden", "1.0", tk.END)
+        self.text_area.tag_remove("visible", "1.0", tk.END)
 
         if hidden_end > 0:
-            self.display.tag_add("hidden", "1.0", f"1.0 + {hidden_end} chars")
-            self.display.tag_add("visible", f"1.0 + {hidden_end} chars", tk.END)
+            self.text_area.tag_add("hidden", "1.0", f"1.0 + {hidden_end} chars")
+            self.text_area.tag_add("visible", f"1.0 + {hidden_end} chars", tk.END)
         else:
-            self.display.tag_add("visible", "1.0", tk.END)
+            self.text_area.tag_add("visible", "1.0", tk.END)
 
-        # Scroll to end
-        self.display.see(tk.END)
-        self.display.config(state=tk.DISABLED)
+        self.text_area.see(tk.END)
+        self.text_area.config(state=tk.DISABLED)
+        self._update_status()
 
-        # Update word count
-        self.word_count_label.config(text=f"{total_words} words")
-
-    def _on_key(self, event):
+    def _on_key_focus(self, event):
         blocked = {"BackSpace", "Delete", "Left", "Right", "Up", "Down",
                    "Home", "End", "Prior", "Next"}
         if event.keysym in blocked:
             return "break"
-
-        # Let modifier combos through (Ctrl+C etc) but not Ctrl+Z (undo)
-        if event.state & 0x4:  # Ctrl held
+        if event.state & 0x4:
             if event.keysym.lower() == 'z':
                 return "break"
-            return  # allow other ctrl combos
-
-        if event.keysym == "Escape":
-            return  # handled by bind
-
+            return
         if event.char and event.char.isprintable():
             self.session_text += event.char
-            self._refresh_display()
+            self._refresh_focus()
             return "break"
-
         if event.keysym == "Return":
             self.session_text += "\n"
-            self._refresh_display()
+            self._refresh_focus()
             return "break"
-
         if event.keysym == "Tab":
             self.session_text += "\t"
-            self._refresh_display()
+            self._refresh_focus()
             return "break"
-
         if event.keysym == "space":
             self.session_text += " "
-            self._refresh_display()
+            self._refresh_focus()
             return "break"
-
         return "break"
 
-    def _finish(self):
-        full = self._full_text()
-        write_text(self.txt_path, full)
+    def _on_review_key(self, event):
+        self._update_status()
+
+    # ── Status bar ────────────────────────────────────────────────────────────
+
+    def _update_status(self):
+        if self.mode == "focus":
+            text = self._full_text()
+        else:
+            text = self.text_area.get("1.0", tk.END)
+        words = len(text.split())
+        self.status_words.config(text=f"{words} words")
+        fname = os.path.basename(self.fwd_path) if self.fwd_path else ""
+        self.status_file.config(text=fname)
+
+    # ── Save / Export ─────────────────────────────────────────────────────────
+
+    def _save(self):
+        if self.mode == "focus":
+            full = self._full_text()
+        else:
+            full = self.text_area.get("1.0", tk.END).rstrip("\n")
+        self.content = full
+        if self.fwd_path:
+            save_fwd(self.fwd_path, self.content, self.settings)
+
+    def _export_txt(self):
+        self._save()
+        path = export_txt(self.content, self.settings.get("export_txt", ""))
+        if path:
+            self.settings["export_txt"] = path
+            self._save()
+            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+
+    def _export_docx(self):
+        self._save()
+        path = export_docx(self.content, self.settings.get("export_docx", ""))
+        if path:
+            self.settings["export_docx"] = path
+            self._save()
+            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+
+    def _set_window_size(self):
+        val = simpledialog.askinteger(
+            "Window Size",
+            "Number of visible words in Focus mode:",
+            initialvalue=self.settings["window_size"],
+            minvalue=1, maxvalue=50,
+            parent=self.win)
+        if val:
+            self.settings["window_size"] = val
+            self._save()
+            if self.mode == "focus":
+                self._refresh_focus()
+
+    # ── File menu actions ─────────────────────────────────────────────────────
+
+    def _menu_new(self):
+        self._save()
         self.win.destroy()
-        self.on_close()
+        self._show_launcher()
+
+    def _menu_open(self):
+        self._save()
+        self.win.destroy()
+        self._show_launcher()
+
+    # ── Close ─────────────────────────────────────────────────────────────────
+
+    def _on_close(self):
+        self._save()
+        self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    app = LauncherApp(root)
+    root.withdraw()
+    app = ForwardOnly(root)
     root.mainloop()
 
 if __name__ == "__main__":
