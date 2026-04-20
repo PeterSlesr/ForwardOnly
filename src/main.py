@@ -5,7 +5,6 @@ import json
 import zipfile
 import shutil
 import tempfile
-import winreg
 
 APP_NAME = "ForwardOnly"
 FWD_EXT = ".fwd"
@@ -95,23 +94,19 @@ def save_fwd(path, content, settings):
 
 def create_desktop_shortcut():
     try:
-        import ctypes
-        exe_path = os.path.abspath(__file__).replace(".py", ".exe")
-        if not os.path.exists(exe_path):
-            exe_path = os.path.abspath(os.sys.executable)
+        exe_path = os.path.abspath(os.sys.executable)
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         shortcut_path = os.path.join(desktop, f"{APP_NAME}.lnk")
         if os.path.exists(shortcut_path):
             return
-        # Use Windows Script Host via shell
         import subprocess
-        vbs = f"""
-Set oWS = WScript.CreateObject("WScript.Shell")
-sLinkFile = "{shortcut_path.replace(chr(92), chr(92)*2)}"
-Set oLink = oWS.CreateShortcut(sLinkFile)
-oLink.TargetPath = "{exe_path.replace(chr(92), chr(92)*2)}"
-oLink.Save
-"""
+        vbs = (
+            'Set oWS = WScript.CreateObject("WScript.Shell")\n'
+            f'sLinkFile = "{shortcut_path}"\n'
+            'Set oLink = oWS.CreateShortcut(sLinkFile)\n'
+            f'oLink.TargetPath = "{exe_path}"\n'
+            'oLink.Save\n'
+        )
         vbs_path = os.path.join(tempfile.gettempdir(), "fo_shortcut.vbs")
         with open(vbs_path, "w") as f:
             f.write(vbs)
@@ -119,14 +114,14 @@ oLink.Save
                        creationflags=0x08000000)
         os.remove(vbs_path)
     except Exception:
-        pass  # Shortcut creation is best-effort
+        pass
 
 
 # ── Export ────────────────────────────────────────────────────────────────────
 
 def export_txt(content, remembered_path):
-    path = remembered_path if remembered_path and os.path.isdir(
-        os.path.dirname(remembered_path)) else None
+    path = remembered_path if (remembered_path and os.path.isdir(
+        os.path.dirname(remembered_path))) else None
     if not path:
         path = filedialog.asksaveasfilename(
             title="Export as TXT",
@@ -136,6 +131,7 @@ def export_txt(content, remembered_path):
         return None
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    os.startfile(path)
     return path
 
 def export_docx(content, remembered_path):
@@ -147,8 +143,8 @@ def export_docx(content, remembered_path):
             "python-docx is not installed.\nRun: pip install python-docx")
         return None
 
-    path = remembered_path if remembered_path and os.path.isdir(
-        os.path.dirname(remembered_path)) else None
+    path = remembered_path if (remembered_path and os.path.isdir(
+        os.path.dirname(remembered_path))) else None
     if not path:
         path = filedialog.asksaveasfilename(
             title="Export as DOCX",
@@ -165,6 +161,7 @@ def export_docx(content, remembered_path):
     for para_text in content.split("\n"):
         doc.add_paragraph(para_text)
     doc.save(path)
+    os.startfile(path)
     return path
 
 
@@ -176,14 +173,25 @@ class ForwardOnly:
         self.root.title(APP_NAME)
         self.root.withdraw()
 
-        self.fwd_path = None
+        self.fwd_path = None        # None = unsaved new project
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
-        self.mode = "focus"  # "focus" or "review"
+        self.mode = "focus"
         self.session_text = ""
 
         create_desktop_shortcut()
         self._show_launcher()
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _is_saved(self):
+        return self.fwd_path is not None
+
+    def _current_content(self):
+        if self.mode == "focus":
+            return self.content + self.session_text
+        else:
+            return self.text_area.get("1.0", tk.END).rstrip("\n")
 
     # ── Launcher ──────────────────────────────────────────────────────────────
 
@@ -191,7 +199,7 @@ class ForwardOnly:
         self.launcher = tk.Toplevel(self.root)
         self.launcher.title(APP_NAME)
         self.launcher.resizable(False, False)
-        self.launcher.geometry("300x220")
+        self.launcher.geometry("300x200")
         self.launcher.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
         tk.Label(self.launcher, text="ForwardOnly",
@@ -207,23 +215,18 @@ class ForwardOnly:
                   relief=tk.RAISED).pack(pady=5)
 
     def _new_project(self):
-        path = filedialog.asksaveasfilename(
-            title="Create new project",
-            defaultextension=FWD_EXT,
-            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}")])
-        if not path:
-            return
-        self.fwd_path = path
+        self.fwd_path = None        # unsaved until user explicitly saves
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
-        save_fwd(path, self.content, self.settings)
+        self.session_text = ""
         self.launcher.destroy()
         self._open_main_window("focus")
 
     def _open_project(self):
         path = filedialog.askopenfilename(
             title="Open project",
-            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}"), ("All files", "*.*")])
+            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}"),
+                       ("All files", "*.*")])
         if not path:
             return
         try:
@@ -232,6 +235,7 @@ class ForwardOnly:
             messagebox.showerror("Error", f"Could not open file:\n{e}")
             return
         self.fwd_path = path
+        self.session_text = ""
         self.launcher.destroy()
         self._ask_mode()
 
@@ -263,10 +267,10 @@ class ForwardOnly:
 
     def _open_main_window(self, mode):
         self.mode = mode
-        self.session_text = ""
 
         self.win = tk.Toplevel(self.root)
-        self.win.title(f"{APP_NAME} — {os.path.basename(self.fwd_path)}")
+        fname = os.path.basename(self.fwd_path) if self.fwd_path else "Untitled"
+        self.win.title(f"{APP_NAME} — {fname}")
         self.win.geometry("800x520")
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -288,13 +292,14 @@ class ForwardOnly:
         self.menubar = tk.Menu(self.win, bg=t["menu_bg"], fg=t["menu_fg"],
                                font=("Courier New", 9))
 
-        # File
         file_menu = tk.Menu(self.menubar, tearoff=0,
                             bg=t["menu_bg"], fg=t["menu_fg"],
                             font=("Courier New", 9))
         file_menu.add_command(label="New Project", command=self._menu_new)
         file_menu.add_command(label="Open Project", command=self._menu_open)
-        file_menu.add_command(label="Save", command=self._save, accelerator="Ctrl+S")
+        file_menu.add_command(label="Save", command=self._save,
+                              accelerator="Ctrl+S")
+        file_menu.add_command(label="Save As...", command=self._save_as)
         file_menu.add_separator()
         export_menu = tk.Menu(file_menu, tearoff=0,
                               bg=t["menu_bg"], fg=t["menu_fg"],
@@ -306,17 +311,20 @@ class ForwardOnly:
         file_menu.add_command(label="Exit", command=self._on_close)
         self.menubar.add_cascade(label="File", menu=file_menu)
 
-        # Settings
         settings_menu = tk.Menu(self.menubar, tearoff=0,
-                                 bg=t["menu_bg"], fg=t["menu_fg"],
-                                 font=("Courier New", 9))
-        settings_menu.add_command(label="Window Size...", command=self._set_window_size)
+                                bg=t["menu_bg"], fg=t["menu_fg"],
+                                font=("Courier New", 9))
+        settings_menu.add_command(label="Window Size...",
+                                  command=self._set_window_size)
         theme_menu = tk.Menu(settings_menu, tearoff=0,
                              bg=t["menu_bg"], fg=t["menu_fg"],
                              font=("Courier New", 9))
-        theme_menu.add_command(label="Light", command=lambda: self._set_theme("light"))
-        theme_menu.add_command(label="Dark — Green", command=lambda: self._set_theme("dark", "green"))
-        theme_menu.add_command(label="Dark — Amber", command=lambda: self._set_theme("dark", "amber"))
+        theme_menu.add_command(label="Light",
+                               command=lambda: self._set_theme("light"))
+        theme_menu.add_command(label="Dark — Green",
+                               command=lambda: self._set_theme("dark", "green"))
+        theme_menu.add_command(label="Dark — Amber",
+                               command=lambda: self._set_theme("dark", "amber"))
         settings_menu.add_cascade(label="Theme", menu=theme_menu)
         self.menubar.add_cascade(label="Settings", menu=settings_menu)
 
@@ -340,15 +348,17 @@ class ForwardOnly:
         self.content_frame = tk.Frame(self.win, bg=t["bg"])
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
+        self.scrollbar = tk.Scrollbar(self.content_frame)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
         self.text_area = tk.Text(self.content_frame,
                                  font=("Courier New", 16),
                                  wrap=tk.WORD, relief=tk.SUNKEN, bd=2,
                                  padx=24, pady=24,
-                                 undo=True)
+                                 undo=True,
+                                 yscrollcommand=self.scrollbar.set)
         self.text_area.pack(fill=tk.BOTH, expand=True)
-
-        scrollbar = tk.Scrollbar(self.content_frame, command=self.text_area.yview)
-        self.text_area.config(yscrollcommand=scrollbar.set)
+        self.scrollbar.config(command=self.text_area.yview)
 
         self.text_area.tag_config("hidden")
         self.text_area.tag_config("visible")
@@ -382,7 +392,6 @@ class ForwardOnly:
 
     def _apply_theme(self):
         t = get_theme(self.settings)
-
         self.win.config(bg=t["bg"])
         self.toolbar.config(bg=t["bg"])
         self.mode_btn.config(bg=t["btn_bg"], fg=t["btn_fg"])
@@ -397,8 +406,6 @@ class ForwardOnly:
         self.status_mode.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_words.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_file.config(bg=t["status_bg"], fg=t["status_fg"])
-
-        # Rebuild menu with new colors
         self.win.config(menu="")
         self._build_menu()
 
@@ -407,7 +414,8 @@ class ForwardOnly:
         if color:
             self.settings["dark_color"] = color
         self._apply_theme()
-        self._save()
+        if self._is_saved():
+            save_fwd(self.fwd_path, self._current_content(), self.settings)
 
     # ── Modes ─────────────────────────────────────────────────────────────────
 
@@ -427,23 +435,28 @@ class ForwardOnly:
         self.text_area.config(state=tk.NORMAL, cursor="xterm")
         self.text_area.delete("1.0", tk.END)
         self.text_area.insert(tk.END, self.content)
+        self.text_area.see(tk.END)
         self.mode_btn.config(text="Switch to Focus")
         self.status_mode.config(text="REVIEW")
         self._update_status()
         self.win.unbind("<Key>")
+        self.win.unbind("<Button-1>")
         self.text_area.bind("<KeyRelease>", self._on_review_key)
+        self.text_area.focus_set()
 
     def _toggle_mode(self):
         if self.mode == "focus":
-            # Commit session text and switch to review
+            # Commit session text, switch to review — save only if already saved
             self.content += self.session_text
             self.session_text = ""
-            self._save()
+            if self._is_saved():
+                save_fwd(self.fwd_path, self.content, self.settings)
             self._enter_review()
         else:
-            # Capture review edits and switch to focus
+            # Capture review edits, switch to focus — save only if already saved
             self.content = self.text_area.get("1.0", tk.END).rstrip("\n")
-            self._save()
+            if self._is_saved():
+                save_fwd(self.fwd_path, self.content, self.settings)
             self._enter_focus()
 
     # ── Focus mode rendering ──────────────────────────────────────────────────
@@ -525,41 +538,51 @@ class ForwardOnly:
     # ── Status bar ────────────────────────────────────────────────────────────
 
     def _update_status(self):
-        if self.mode == "focus":
-            text = self._full_text()
-        else:
-            text = self.text_area.get("1.0", tk.END)
-        words = len(text.split())
+        text = self._current_content()
+        words = len(text.split()) if text.strip() else 0
         self.status_words.config(text=f"{words} words")
-        fname = os.path.basename(self.fwd_path) if self.fwd_path else ""
+        fname = os.path.basename(self.fwd_path) if self.fwd_path else "Untitled"
         self.status_file.config(text=fname)
 
-    # ── Save / Export ─────────────────────────────────────────────────────────
+    # ── Save ─────────────────────────────────────────────────────────────────
 
     def _save(self):
-        if self.mode == "focus":
-            full = self._full_text()
+        if not self._is_saved():
+            self._save_as()
         else:
-            full = self.text_area.get("1.0", tk.END).rstrip("\n")
-        self.content = full
-        if self.fwd_path:
-            save_fwd(self.fwd_path, self.content, self.settings)
+            save_fwd(self.fwd_path, self._current_content(), self.settings)
+
+    def _save_as(self):
+        path = filedialog.asksaveasfilename(
+            title="Save project as",
+            defaultextension=FWD_EXT,
+            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}")])
+        if not path:
+            return
+        self.fwd_path = path
+        self.content = self._current_content()
+        save_fwd(self.fwd_path, self.content, self.settings)
+        fname = os.path.basename(self.fwd_path)
+        self.win.title(f"{APP_NAME} — {fname}")
+        self._update_status()
+
+    # ── Export ────────────────────────────────────────────────────────────────
 
     def _export_txt(self):
-        self._save()
-        path = export_txt(self.content, self.settings.get("export_txt", ""))
+        content = self._current_content()
+        path = export_txt(content, self.settings.get("export_txt", ""))
         if path:
             self.settings["export_txt"] = path
-            self._save()
-            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+            if self._is_saved():
+                save_fwd(self.fwd_path, self._current_content(), self.settings)
 
     def _export_docx(self):
-        self._save()
-        path = export_docx(self.content, self.settings.get("export_docx", ""))
+        content = self._current_content()
+        path = export_docx(content, self.settings.get("export_docx", ""))
         if path:
             self.settings["export_docx"] = path
-            self._save()
-            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+            if self._is_saved():
+                save_fwd(self.fwd_path, self._current_content(), self.settings)
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
@@ -572,26 +595,48 @@ class ForwardOnly:
             parent=self.win)
         if val:
             self.settings["window_size"] = val
-            self._save()
+            if self._is_saved():
+                save_fwd(self.fwd_path, self._current_content(), self.settings)
             if self.mode == "focus":
                 self._refresh_focus()
 
-    # ── File menu actions ─────────────────────────────────────────────────────
+    # ── File menu ─────────────────────────────────────────────────────────────
 
     def _menu_new(self):
-        self._save()
+        if self._is_saved():
+            self._save()
         self.win.destroy()
+        self.fwd_path = None
+        self.content = ""
+        self.settings = dict(DEFAULT_SETTINGS)
+        self.session_text = ""
         self._show_launcher()
 
     def _menu_open(self):
-        self._save()
+        if self._is_saved():
+            self._save()
         self.win.destroy()
         self._show_launcher()
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def _on_close(self):
-        self._save()
+        if not self._is_saved():
+            content = self._current_content()
+            if content.strip():
+                answer = messagebox.askyesnocancel(
+                    "Save before closing?",
+                    "This project hasn't been saved yet.\nSave now?")
+                if answer is None:   # Cancel
+                    return
+                if answer:           # Yes
+                    self._save_as()
+                    if not self._is_saved():  # user cancelled save dialog
+                        return
+        elif self.mode == "focus" and self.session_text:
+            self._save()
+        elif self.mode == "review":
+            self._save()
         self.root.destroy()
 
 
