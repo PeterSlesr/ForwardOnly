@@ -111,21 +111,68 @@ def import_docx(path):
         return None
 
 
+# ── Resource path (works both dev and PyInstaller) ───────────────────────────
+
+def resource_path(relative):
+    """Get path to bundled resource."""
+    import sys
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+def get_exe_path():
+    """Return path to the running exe (or script in dev)."""
+    import sys
+    if getattr(sys, 'frozen', False):
+        return sys.executable
+    return os.path.abspath(__file__)
+
+
+# ── First-run setup ───────────────────────────────────────────────────────────
+
+SETUP_DONE_KEY = r"Software\ForwardOnly"
+
+def is_setup_done():
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETUP_DONE_KEY)
+        val, _ = winreg.QueryValueEx(key, "SetupDone")
+        winreg.CloseKey(key)
+        return val == 1
+    except Exception:
+        return False
+
+def mark_setup_done():
+    try:
+        import winreg
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETUP_DONE_KEY)
+        winreg.SetValueEx(key, "SetupDone", 0, winreg.REG_DWORD, 1)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+def first_run_setup():
+    if is_setup_done():
+        return
+    create_desktop_shortcut()
+    register_fwd_extension()
+    mark_setup_done()
+
+
 # ── Desktop shortcut ──────────────────────────────────────────────────────────
 
 def create_desktop_shortcut():
     try:
-        exe_path = os.path.abspath(os.sys.executable)
+        import subprocess
+        exe_path = get_exe_path()
+        ico_path = resource_path(os.path.join("assets", "forwardonly.ico"))
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         shortcut_path = os.path.join(desktop, f"{APP_NAME}.lnk")
-        if os.path.exists(shortcut_path):
-            return
-        import subprocess
         vbs = (
             'Set oWS = WScript.CreateObject("WScript.Shell")\n'
             f'sLinkFile = "{shortcut_path}"\n'
             'Set oLink = oWS.CreateShortcut(sLinkFile)\n'
             f'oLink.TargetPath = "{exe_path}"\n'
+            f'oLink.IconLocation = "{ico_path}"\n'
             'oLink.Save\n'
         )
         vbs_path = os.path.join(tempfile.gettempdir(), "fo_shortcut.vbs")
@@ -133,7 +180,53 @@ def create_desktop_shortcut():
             f.write(vbs)
         subprocess.run(["wscript", vbs_path], check=False,
                        creationflags=0x08000000)
-        os.remove(vbs_path)
+        try:
+            os.remove(vbs_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+# ── Register .fwd extension ───────────────────────────────────────────────────
+
+def register_fwd_extension():
+    try:
+        import winreg
+        exe_path = get_exe_path()
+        ico_path = resource_path(os.path.join("assets", "forwardonly.ico"))
+
+        # .fwd -> ForwardOnly.Document
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Classes\.fwd")
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "ForwardOnly.Document")
+        winreg.CloseKey(k)
+
+        # ForwardOnly.Document description
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Classes\ForwardOnly.Document")
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "ForwardOnly Project")
+        winreg.CloseKey(k)
+
+        # Icon
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Classes\ForwardOnly.Document\DefaultIcon")
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"{ico_path},0")
+        winreg.CloseKey(k)
+
+        # Open command
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Classes\ForwardOnly.Document\shell\open\command")
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe_path}" "%1"')
+        winreg.CloseKey(k)
+
+        # Notify Windows shell to refresh icons
+        try:
+            import ctypes
+            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+        except Exception:
+            pass
+
     except Exception:
         pass
 
@@ -201,7 +294,7 @@ def export_docx(content, fwd_path, remembered_path):
 # ── Main Application ──────────────────────────────────────────────────────────
 
 class ForwardOnly:
-    def __init__(self, root):
+    def __init__(self, root, open_path=None):
         self.root = root
         self.root.title(APP_NAME)
         self.root.withdraw()
@@ -211,10 +304,27 @@ class ForwardOnly:
         self.settings = dict(DEFAULT_SETTINGS)
         self.mode = "focus"
         self.session_text = ""
-        self.import_source = None   # filename imported from, for status message
+        self.import_source = None
 
-        create_desktop_shortcut()
-        self._show_launcher()
+        first_run_setup()
+
+        if open_path:
+            self._open_fwd_direct(open_path)
+        else:
+            self._show_launcher()
+
+    def _open_fwd_direct(self, path):
+        """Open a .fwd file directly into Focus mode (e.g. from double-click)."""
+        try:
+            self.content, self.settings = load_fwd(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file:\n{e}")
+            self._show_launcher()
+            return
+        self.fwd_path = path
+        self.session_text = ""
+        self.import_source = None
+        self._open_main_window("focus")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -769,9 +879,16 @@ class ForwardOnly:
 
 
 def main():
+    import sys
+    open_path = None
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        if os.path.isfile(arg) and arg.lower().endswith(FWD_EXT):
+            open_path = arg
+
     root = tk.Tk()
     root.withdraw()
-    app = ForwardOnly(root)
+    app = ForwardOnly(root, open_path=open_path)
     root.mainloop()
 
 if __name__ == "__main__":

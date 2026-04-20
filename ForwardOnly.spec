@@ -6,7 +6,7 @@ a = Analysis(
     ['src/main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets/forwardonly.ico', 'assets')],
     hiddenimports=['docx', 'docx.shared', 'docx.enum.text'],
     hookspath=[],
     hooksconfig={},
@@ -38,5 +38,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon='assets/forwardonly.ico',
 )
