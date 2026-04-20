@@ -90,6 +90,27 @@ def save_fwd(path, content, settings):
     shutil.move(tmp, path)
 
 
+# ── Import from TXT / DOCX ────────────────────────────────────────────────────
+
+def import_txt(path):
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+def import_docx(path):
+    try:
+        from docx import Document
+        doc = Document(path)
+        paragraphs = [p.text for p in doc.paragraphs]
+        return "\n".join(paragraphs)
+    except ImportError:
+        messagebox.showerror("Missing library",
+            "python-docx is not installed.\nCannot import .docx files.")
+        return None
+    except Exception as e:
+        messagebox.showerror("Import error", f"Could not read .docx file:\n{e}")
+        return None
+
+
 # ── Desktop shortcut ──────────────────────────────────────────────────────────
 
 def create_desktop_shortcut():
@@ -119,14 +140,26 @@ def create_desktop_shortcut():
 
 # ── Export ────────────────────────────────────────────────────────────────────
 
-def export_txt(content, remembered_path):
-    path = remembered_path if (remembered_path and os.path.isdir(
-        os.path.dirname(remembered_path))) else None
-    if not path:
-        path = filedialog.asksaveasfilename(
-            title="Export as TXT",
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt")])
+def _default_export_path(fwd_path, ext, remembered_path):
+    """Return remembered path if valid, else derive from fwd_path or use Untitled."""
+    if remembered_path and os.path.isdir(os.path.dirname(remembered_path)):
+        return remembered_path
+    if fwd_path:
+        base = os.path.splitext(os.path.basename(fwd_path))[0]
+        folder = os.path.dirname(fwd_path)
+    else:
+        base = "Untitled"
+        folder = os.path.expanduser("~")
+    return os.path.join(folder, base + ext)
+
+def export_txt(content, fwd_path, remembered_path):
+    initial = _default_export_path(fwd_path, ".txt", remembered_path)
+    path = filedialog.asksaveasfilename(
+        title="Export as TXT",
+        defaultextension=".txt",
+        initialfile=os.path.basename(initial),
+        initialdir=os.path.dirname(initial),
+        filetypes=[("Text files", "*.txt")])
     if not path:
         return None
     with open(path, "w", encoding="utf-8") as f:
@@ -134,22 +167,22 @@ def export_txt(content, remembered_path):
     os.startfile(path)
     return path
 
-def export_docx(content, remembered_path):
+def export_docx(content, fwd_path, remembered_path):
     try:
         from docx import Document
         from docx.shared import Pt
     except ImportError:
         messagebox.showerror("Missing library",
-            "python-docx is not installed.\nRun: pip install python-docx")
+            "python-docx is not installed.")
         return None
 
-    path = remembered_path if (remembered_path and os.path.isdir(
-        os.path.dirname(remembered_path))) else None
-    if not path:
-        path = filedialog.asksaveasfilename(
-            title="Export as DOCX",
-            defaultextension=".docx",
-            filetypes=[("Word documents", "*.docx")])
+    initial = _default_export_path(fwd_path, ".docx", remembered_path)
+    path = filedialog.asksaveasfilename(
+        title="Export as DOCX",
+        defaultextension=".docx",
+        initialfile=os.path.basename(initial),
+        initialdir=os.path.dirname(initial),
+        filetypes=[("Word documents", "*.docx")])
     if not path:
         return None
 
@@ -173,11 +206,12 @@ class ForwardOnly:
         self.root.title(APP_NAME)
         self.root.withdraw()
 
-        self.fwd_path = None        # None = unsaved new project
+        self.fwd_path = None
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
         self.mode = "focus"
         self.session_text = ""
+        self.import_source = None   # filename imported from, for status message
 
         create_desktop_shortcut()
         self._show_launcher()
@@ -192,6 +226,23 @@ class ForwardOnly:
             return self.content + self.session_text
         else:
             return self.text_area.get("1.0", tk.END).rstrip("\n")
+
+    def _has_content(self):
+        return bool(self._current_content().strip())
+
+    def _prompt_save_before_leaving(self):
+        """Returns True if safe to proceed, False if user cancelled."""
+        if not self._is_saved() and self._has_content():
+            answer = messagebox.askyesnocancel(
+                "Unsaved project",
+                "This project hasn't been saved.\nSave before leaving?")
+            if answer is None:
+                return False
+            if answer:
+                self._save_as()
+                if not self._is_saved():
+                    return False
+        return True
 
     # ── Launcher ──────────────────────────────────────────────────────────────
 
@@ -215,29 +266,68 @@ class ForwardOnly:
                   relief=tk.RAISED).pack(pady=5)
 
     def _new_project(self):
-        self.fwd_path = None        # unsaved until user explicitly saves
+        self.fwd_path = None
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
         self.session_text = ""
+        self.import_source = None
         self.launcher.destroy()
         self._open_main_window("focus")
 
     def _open_project(self):
         path = filedialog.askopenfilename(
             title="Open project",
-            filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}"),
-                       ("All files", "*.*")])
+            filetypes=[
+                ("All supported files", f"*{FWD_EXT} *.txt *.docx"),
+                ("ForwardOnly files", f"*{FWD_EXT}"),
+                ("Text files", "*.txt"),
+                ("Word documents", "*.docx"),
+                ("All files", "*.*")
+            ])
         if not path:
             return
-        try:
-            self.content, self.settings = load_fwd(path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not open file:\n{e}")
-            return
-        self.fwd_path = path
-        self.session_text = ""
-        self.launcher.destroy()
-        self._ask_mode()
+
+        ext = os.path.splitext(path)[1].lower()
+
+        if ext == FWD_EXT:
+            try:
+                self.content, self.settings = load_fwd(path)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file:\n{e}")
+                return
+            self.fwd_path = path
+            self.session_text = ""
+            self.import_source = None
+            self.launcher.destroy()
+            self._ask_mode()
+
+        elif ext == ".txt":
+            content = import_txt(path)
+            if content is None:
+                return
+            self.fwd_path = None
+            self.content = content
+            self.settings = dict(DEFAULT_SETTINGS)
+            self.session_text = ""
+            self.import_source = os.path.basename(path)
+            self.launcher.destroy()
+            self._open_main_window("focus")
+
+        elif ext == ".docx":
+            content = import_docx(path)
+            if content is None:
+                return
+            self.fwd_path = None
+            self.content = content
+            self.settings = dict(DEFAULT_SETTINGS)
+            self.session_text = ""
+            self.import_source = os.path.basename(path)
+            self.launcher.destroy()
+            self._open_main_window("focus")
+
+        else:
+            messagebox.showerror("Unsupported file",
+                "Please open a .fwd, .txt, or .docx file.")
 
     def _ask_mode(self):
         dialog = tk.Toplevel(self.root)
@@ -285,7 +375,28 @@ class ForwardOnly:
         else:
             self._enter_review()
 
+        # Show import notice if applicable
+        if self.import_source:
+            self._show_import_notice()
+
         self.win.focus_force()
+
+    def _show_import_notice(self):
+        notice = tk.Toplevel(self.win)
+        notice.title("Imported")
+        notice.resizable(False, False)
+        notice.geometry("340x120")
+        tk.Label(notice,
+                 text=f"Imported from: {self.import_source}",
+                 font=("Courier New", 9, "bold")).pack(pady=(20, 4))
+        tk.Label(notice,
+                 text="Save as a .fwd project to continue.",
+                 font=("Courier New", 9)).pack()
+        tk.Button(notice, text="OK", font=("Courier New", 9),
+                  command=notice.destroy, width=8,
+                  relief=tk.RAISED).pack(pady=12)
+        notice.transient(self.win)
+        notice.grab_set()
 
     def _build_menu(self):
         t = get_theme(self.settings)
@@ -446,14 +557,12 @@ class ForwardOnly:
 
     def _toggle_mode(self):
         if self.mode == "focus":
-            # Commit session text, switch to review — save only if already saved
             self.content += self.session_text
             self.session_text = ""
             if self._is_saved():
                 save_fwd(self.fwd_path, self.content, self.settings)
             self._enter_review()
         else:
-            # Capture review edits, switch to focus — save only if already saved
             self.content = self.text_area.get("1.0", tk.END).rstrip("\n")
             if self._is_saved():
                 save_fwd(self.fwd_path, self.content, self.settings)
@@ -544,7 +653,7 @@ class ForwardOnly:
         fname = os.path.basename(self.fwd_path) if self.fwd_path else "Untitled"
         self.status_file.config(text=fname)
 
-    # ── Save ─────────────────────────────────────────────────────────────────
+    # ── Save ──────────────────────────────────────────────────────────────────
 
     def _save(self):
         if not self._is_saved():
@@ -553,14 +662,22 @@ class ForwardOnly:
             save_fwd(self.fwd_path, self._current_content(), self.settings)
 
     def _save_as(self):
+        # Suggest filename based on import source or untitled
+        if self.import_source:
+            suggested = os.path.splitext(self.import_source)[0] + FWD_EXT
+        else:
+            suggested = "Untitled" + FWD_EXT
+
         path = filedialog.asksaveasfilename(
             title="Save project as",
             defaultextension=FWD_EXT,
+            initialfile=suggested,
             filetypes=[(f"ForwardOnly files", f"*{FWD_EXT}")])
         if not path:
             return
         self.fwd_path = path
         self.content = self._current_content()
+        self.import_source = None
         save_fwd(self.fwd_path, self.content, self.settings)
         fname = os.path.basename(self.fwd_path)
         self.win.title(f"{APP_NAME} — {fname}")
@@ -570,7 +687,8 @@ class ForwardOnly:
 
     def _export_txt(self):
         content = self._current_content()
-        path = export_txt(content, self.settings.get("export_txt", ""))
+        path = export_txt(content, self.fwd_path,
+                          self.settings.get("export_txt", ""))
         if path:
             self.settings["export_txt"] = path
             if self._is_saved():
@@ -578,7 +696,8 @@ class ForwardOnly:
 
     def _export_docx(self):
         content = self._current_content()
-        path = export_docx(content, self.settings.get("export_docx", ""))
+        path = export_docx(content, self.fwd_path,
+                           self.settings.get("export_docx", ""))
         if path:
             self.settings["export_docx"] = path
             if self._is_saved():
@@ -603,40 +722,40 @@ class ForwardOnly:
     # ── File menu ─────────────────────────────────────────────────────────────
 
     def _menu_new(self):
-        if self._is_saved():
-            self._save()
+        if not self._prompt_save_before_leaving():
+            return
         self.win.destroy()
         self.fwd_path = None
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
         self.session_text = ""
+        self.import_source = None
         self._show_launcher()
 
     def _menu_open(self):
-        if self._is_saved():
-            self._save()
+        if not self._prompt_save_before_leaving():
+            return
         self.win.destroy()
         self._show_launcher()
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def _on_close(self):
-        if not self._is_saved():
-            content = self._current_content()
-            if content.strip():
-                answer = messagebox.askyesnocancel(
-                    "Save before closing?",
-                    "This project hasn't been saved yet.\nSave now?")
-                if answer is None:   # Cancel
+        if not self._is_saved() and self._has_content():
+            answer = messagebox.askyesnocancel(
+                "Save before closing?",
+                "This project hasn't been saved yet.\nSave now?")
+            if answer is None:
+                return
+            if answer:
+                self._save_as()
+                if not self._is_saved():
                     return
-                if answer:           # Yes
-                    self._save_as()
-                    if not self._is_saved():  # user cancelled save dialog
-                        return
-        elif self.mode == "focus" and self.session_text:
-            self._save()
-        elif self.mode == "review":
-            self._save()
+        elif self._is_saved():
+            if self.mode == "focus" and self.session_text:
+                self._save()
+            elif self.mode == "review":
+                self._save()
         self.root.destroy()
 
 
