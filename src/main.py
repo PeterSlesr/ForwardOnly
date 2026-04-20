@@ -573,29 +573,35 @@ class ForwardOnly:
     def _full_text(self):
         return self.content + self.session_text
 
+    def _tokenize(self, text):
+        import re
+        result = []
+        # split on newlines or whitespace, keeping delimiters
+        for part in re.split("(\n+|[ \t]+)", text):
+            if not part:
+                continue
+            is_word = bool(part.strip()) and ("\n" not in part)
+            result.append((part, is_word))
+        return result
+
+
     def _refresh_focus(self):
         full = self._full_text()
-        tokens = full.split()
-        total_words = len(tokens)
+        tokens = self._tokenize(full)
         n = self.settings["window_size"]
 
+        word_indices = [i for i, (t, is_word) in enumerate(tokens) if is_word]
+        total_words = len(word_indices)
+
         if total_words <= n:
-            hidden_words, visible_words = [], tokens
+            split_idx = 0
         else:
-            hidden_words, visible_words = tokens[:-n], tokens[-n:]
+            split_idx = word_indices[-n]
 
-        hidden_text = " ".join(hidden_words)
-        visible_text = " ".join(visible_words)
-
-        if hidden_words and visible_words:
-            display_text = hidden_text + " " + visible_text
-            hidden_end = len(hidden_text) + 1
-        elif hidden_words:
-            display_text = hidden_text
-            hidden_end = len(hidden_text)
-        else:
-            display_text = visible_text
-            hidden_end = 0
+        hidden_text = "".join(t for t, _ in tokens[:split_idx])
+        visible_text = "".join(t for t, _ in tokens[split_idx:])
+        display_text = hidden_text + visible_text
+        hidden_end = len(hidden_text)
 
         self.text_area.config(state=tk.NORMAL)
         self.text_area.delete("1.0", tk.END)
@@ -610,7 +616,10 @@ class ForwardOnly:
         else:
             self.text_area.tag_add("visible", "1.0", tk.END)
 
+        self.text_area.mark_set("insert", tk.END)
         self.text_area.see(tk.END)
+        self.text_area.config(state=tk.NORMAL)
+        self.text_area.config(insertbackground=get_theme(self.settings)["content_fg"])
         self.text_area.config(state=tk.DISABLED)
         self._update_status()
 
