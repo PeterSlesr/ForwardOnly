@@ -583,8 +583,7 @@ class ForwardOnly:
                                  wrap=tk.WORD, relief=tk.SUNKEN, bd=2,
                                  padx=24, pady=24,
                                  undo=True,
-                                 yscrollcommand=self.scrollbar.set,
-                                 spacing3=120)
+                                 yscrollcommand=self.scrollbar.set)
         self.text_area.pack(fill=tk.BOTH, expand=True)
         self.scrollbar.config(command=self.text_area.yview)
 
@@ -639,7 +638,8 @@ class ForwardOnly:
         self.statusbar.config(bg=t["status_bg"])
         self.status_mode.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_words.config(bg=t["status_bg"], fg=t["status_fg"])
-        self.status_doc_words.config(bg=t["status_bg"], fg=t["status_fg"])
+        if hasattr(self, "status_doc_words"):
+            self.status_doc_words.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_file.config(bg=t["status_bg"], fg=t["status_fg"])
         self.win.config(menu="")
         self._build_menu()
@@ -740,6 +740,9 @@ class ForwardOnly:
         else:
             self.text_area.tag_add("visible", "1.0", tk.END)
 
+        # Add bottom padding spacer
+        self.text_area.insert(tk.END, "\n\n\n\n\n")
+
         self.text_area.mark_set("insert", tk.END)
         self.text_area.see(tk.END)
         self.text_area.config(state=tk.NORMAL)
@@ -780,12 +783,13 @@ class ForwardOnly:
     # ── Status bar ────────────────────────────────────────────────────────────
 
     def _update_status(self):
+        if not hasattr(self, "status_words"):
+            return
         text = self._current_content()
         doc_words = len(text.split()) if text.strip() else 0
 
-        # Session words = words in current content minus words in base content at open
-        base_words = len(self.content.split()) if self.content.strip() else 0
-        session_words = len((self.content + self.session_text).split()) if (self.content + self.session_text).strip() else 0
+        full_session = self.content + self.session_text
+        session_words = len(full_session.split()) if full_session.strip() else 0
         if self.mode == "review":
             session_words = doc_words
 
@@ -795,7 +799,8 @@ class ForwardOnly:
         else:
             self.status_words.config(text=f"{session_words} session")
 
-        self.status_doc_words.config(text=f"{doc_words} doc")
+        if hasattr(self, "status_doc_words"):
+            self.status_doc_words.config(text=f"{doc_words} doc")
         fname = os.path.basename(self.fwd_path) if self.fwd_path else "Untitled"
         self.status_file.config(text=fname)
 
