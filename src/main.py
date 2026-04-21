@@ -16,7 +16,8 @@ DEFAULT_SETTINGS = {
     "theme": "light",
     "dark_color": "green",
     "export_txt": "",
-    "export_docx": ""
+    "export_docx": "",
+    "word_target": 0
 }
 
 # ── Theme definitions ─────────────────────────────────────────────────────────
@@ -305,6 +306,7 @@ class ForwardOnly:
         self.mode = "focus"
         self.session_text = ""
         self.import_source = None
+        self.session_words = 0
 
         first_run_setup()
 
@@ -323,6 +325,7 @@ class ForwardOnly:
             return
         self.fwd_path = path
         self.session_text = ""
+        self.session_words = 0
         self.import_source = None
         self._open_main_window("focus")
 
@@ -380,6 +383,7 @@ class ForwardOnly:
         self.content = ""
         self.settings = dict(DEFAULT_SETTINGS)
         self.session_text = ""
+        self.session_words = 0
         self.import_source = None
         self.launcher.destroy()
         self._open_main_window("focus")
@@ -537,6 +541,8 @@ class ForwardOnly:
                                 font=("Courier New", 9))
         settings_menu.add_command(label="Window Size...",
                                   command=self._set_window_size)
+        settings_menu.add_command(label="Word Target...",
+                                  command=self._set_word_target)
         theme_menu = tk.Menu(settings_menu, tearoff=0,
                              bg=t["menu_bg"], fg=t["menu_fg"],
                              font=("Courier New", 9))
@@ -577,7 +583,8 @@ class ForwardOnly:
                                  wrap=tk.WORD, relief=tk.SUNKEN, bd=2,
                                  padx=24, pady=24,
                                  undo=True,
-                                 yscrollcommand=self.scrollbar.set)
+                                 yscrollcommand=self.scrollbar.set,
+                                 spacing3=120)
         self.text_area.pack(fill=tk.BOTH, expand=True)
         self.scrollbar.config(command=self.text_area.yview)
 
@@ -597,11 +604,17 @@ class ForwardOnly:
                                     anchor=tk.W)
         self.status_mode.pack(side=tk.LEFT, padx=8)
 
+        self.status_doc_words = tk.Label(self.statusbar, text="",
+                                         font=("Courier New", 8),
+                                         bg=t["status_bg"], fg=t["status_fg"],
+                                         anchor=tk.E)
+        self.status_doc_words.pack(side=tk.RIGHT, padx=8)
+
         self.status_words = tk.Label(self.statusbar, text="",
                                      font=("Courier New", 8),
                                      bg=t["status_bg"], fg=t["status_fg"],
                                      anchor=tk.E)
-        self.status_words.pack(side=tk.RIGHT, padx=8)
+        self.status_words.pack(side=tk.RIGHT, padx=16)
 
         self.status_file = tk.Label(self.statusbar, text="",
                                     font=("Courier New", 8),
@@ -626,6 +639,7 @@ class ForwardOnly:
         self.statusbar.config(bg=t["status_bg"])
         self.status_mode.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_words.config(bg=t["status_bg"], fg=t["status_fg"])
+        self.status_doc_words.config(bg=t["status_bg"], fg=t["status_fg"])
         self.status_file.config(bg=t["status_bg"], fg=t["status_fg"])
         self.win.config(menu="")
         self._build_menu()
@@ -767,8 +781,21 @@ class ForwardOnly:
 
     def _update_status(self):
         text = self._current_content()
-        words = len(text.split()) if text.strip() else 0
-        self.status_words.config(text=f"{words} words")
+        doc_words = len(text.split()) if text.strip() else 0
+
+        # Session words = words in current content minus words in base content at open
+        base_words = len(self.content.split()) if self.content.strip() else 0
+        session_words = len((self.content + self.session_text).split()) if (self.content + self.session_text).strip() else 0
+        if self.mode == "review":
+            session_words = doc_words
+
+        target = self.settings.get("word_target", 0)
+        if target:
+            self.status_words.config(text=f"{session_words} / {target} session")
+        else:
+            self.status_words.config(text=f"{session_words} session")
+
+        self.status_doc_words.config(text=f"{doc_words} doc")
         fname = os.path.basename(self.fwd_path) if self.fwd_path else "Untitled"
         self.status_file.config(text=fname)
 
@@ -837,6 +864,20 @@ class ForwardOnly:
                 save_fwd(self.fwd_path, self._current_content(), self.settings)
             if self.mode == "focus":
                 self._refresh_focus()
+
+    def _set_word_target(self):
+        current = self.settings.get("word_target", 0)
+        val = simpledialog.askinteger(
+            "Word Target",
+            "Session word count target (0 to disable):",
+            initialvalue=current,
+            minvalue=0, maxvalue=1000000,
+            parent=self.win)
+        if val is not None:
+            self.settings["word_target"] = val
+            if self._is_saved():
+                save_fwd(self.fwd_path, self._current_content(), self.settings)
+            self._update_status()
 
     # ── File menu ─────────────────────────────────────────────────────────────
 
