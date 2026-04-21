@@ -480,8 +480,8 @@ class ForwardOnly:
 
         self._build_menu()
         self._build_toolbar()
-        self._build_content()
         self._build_statusbar()
+        self._build_content()
         self._apply_theme()
 
         if mode == "focus":
