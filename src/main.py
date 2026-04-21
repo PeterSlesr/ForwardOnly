@@ -593,7 +593,7 @@ class ForwardOnly:
     def _build_statusbar(self):
         t = get_theme(self.settings)
         self.statusbar = tk.Frame(self.win, bg=t["status_bg"],
-                                  relief=tk.SUNKEN, bd=1, height=20)
+                                  relief=tk.SUNKEN, bd=1, height=22)
         self.statusbar.pack(fill=tk.X, side=tk.BOTTOM)
         self.statusbar.pack_propagate(False)
 
@@ -603,17 +603,17 @@ class ForwardOnly:
                                     anchor=tk.W)
         self.status_mode.pack(side=tk.LEFT, padx=8)
 
+        self.status_words = tk.Label(self.statusbar, text="",
+                                     font=("Courier New", 8),
+                                     bg=t["status_bg"], fg=t["status_fg"],
+                                     anchor=tk.E)
+        self.status_words.pack(side=tk.RIGHT, padx=8)
+
         self.status_doc_words = tk.Label(self.statusbar, text="",
                                          font=("Courier New", 8),
                                          bg=t["status_bg"], fg=t["status_fg"],
                                          anchor=tk.E)
         self.status_doc_words.pack(side=tk.RIGHT, padx=8)
-
-        self.status_words = tk.Label(self.statusbar, text="",
-                                     font=("Courier New", 8),
-                                     bg=t["status_bg"], fg=t["status_fg"],
-                                     anchor=tk.E)
-        self.status_words.pack(side=tk.RIGHT, padx=16)
 
         self.status_file = tk.Label(self.statusbar, text="",
                                     font=("Courier New", 8),
